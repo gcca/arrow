@@ -15,27 +15,27 @@
 # specific language governing permissions and limitations
 # under the License.
 
-FROM ubuntu:groovy
-
-RUN \
-  echo "debconf debconf/frontend select Noninteractive" | \
-    debconf-set-selections
-
-RUN \
-  echo 'APT::Install-Recommends "false";' > \
-    /etc/apt/apt.conf.d/disable-install-recommends
-
-ARG DEBUG
-
-RUN \
-  quiet=$([ "${DEBUG}" = "yes" ] || echo "-qq") && \
-  apt update ${quiet} && \
-  apt install -y -V ${quiet} \
-    build-essential \
-    debhelper \
-    devscripts \
-    fakeroot \
-    gnupg \
-    lsb-release && \
-  apt clean && \
-  rm -rf /var/lib/apt/lists/*
+module Arrow
+  class RecordBatchReader
+    class << self
+      # @api private
+      def try_convert(value)
+        case value
+        when ::Array
+          return nil if value.empty?
+          if value.all? {|v| v.is_a?(RecordBatch)}
+            new(value)
+          else
+            nil
+          end
+        when RecordBatch
+          new([value])
+        when Table
+          TableBatchReader.new(value)
+        else
+          nil
+        end
+      end
+    end
+  end
+end

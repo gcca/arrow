@@ -111,6 +111,14 @@ TEST_F(TestArray, TestLength) {
   ASSERT_EQ(arr->length(), 100);
 }
 
+TEST_F(TestArray, TestNullToString) {
+  // Invalid NULL buffer
+  auto data = std::make_shared<Buffer>(nullptr, 400);
+
+  std::unique_ptr<Int32Array> arr(new Int32Array(100, data));
+  ASSERT_EQ(arr->ToString(), "<InvalidArray: Missing values buffer in non-empty array>");
+}
+
 TEST_F(TestArray, TestSliceSafe) {
   std::vector<int32_t> original_data{1, 2, 3, 4, 5, 6, 7};
   auto arr = std::make_shared<Int32Array>(7, Buffer::Wrap(original_data));
@@ -399,6 +407,35 @@ TEST_F(TestArray, TestMakeArrayOfNullUnion) {
   }
 }
 
+TEST_F(TestArray, TestValidateNullCount) {
+  Int32Builder builder(pool_);
+  ASSERT_OK(builder.Append(5));
+  ASSERT_OK(builder.Append(42));
+  ASSERT_OK(builder.AppendNull());
+  ASSERT_OK_AND_ASSIGN(auto array, builder.Finish());
+
+  ArrayData* data = array->data().get();
+  data->null_count = kUnknownNullCount;
+  ASSERT_OK(array->ValidateFull());
+  data->null_count = 1;
+  ASSERT_OK(array->ValidateFull());
+
+  // null_count out of bounds
+  data->null_count = -2;
+  ASSERT_RAISES(Invalid, array->Validate());
+  ASSERT_RAISES(Invalid, array->ValidateFull());
+  data->null_count = 4;
+  ASSERT_RAISES(Invalid, array->Validate());
+  ASSERT_RAISES(Invalid, array->ValidateFull());
+
+  // null_count inconsistent with data
+  for (const int64_t null_count : {0, 2, 3}) {
+    data->null_count = null_count;
+    ASSERT_OK(array->Validate());
+    ASSERT_RAISES(Invalid, array->ValidateFull());
+  }
+}
+
 void AssertAppendScalar(MemoryPool* pool, const std::shared_ptr<Scalar>& scalar) {
   std::unique_ptr<arrow::ArrayBuilder> builder;
   auto null_scalar = MakeNullScalar(scalar->type);
@@ -413,15 +450,25 @@ void AssertAppendScalar(MemoryPool* pool, const std::shared_ptr<Scalar>& scalar)
   std::shared_ptr<Array> out;
   FinishAndCheckPadding(builder.get(), &out);
   ASSERT_OK(out->ValidateFull());
+  AssertTypeEqual(scalar->type, out->type());
   ASSERT_EQ(out->length(), 9);
-  ASSERT_EQ(out->null_count(), 4);
+
+  const bool can_check_nulls = internal::HasValidityBitmap(out->type()->id());
+
+  if (can_check_nulls) {
+    ASSERT_EQ(out->null_count(), 4);
+  }
   for (const auto index : {0, 1, 3, 5, 6}) {
     ASSERT_FALSE(out->IsNull(index));
     ASSERT_OK_AND_ASSIGN(auto scalar_i, out->GetScalar(index));
+    ASSERT_OK(scalar_i->ValidateFull());
     AssertScalarsEqual(*scalar, *scalar_i, /*verbose=*/true);
   }
   for (const auto index : {2, 4, 7, 8}) {
-    ASSERT_TRUE(out->IsNull(index));
+    ASSERT_EQ(out->IsNull(index), can_check_nulls);
+    ASSERT_OK_AND_ASSIGN(auto scalar_i, out->GetScalar(index));
+    ASSERT_OK(scalar_i->ValidateFull());
+    AssertScalarsEqual(*null_scalar, *scalar_i, /*verbose=*/true);
   }
 }
 
@@ -429,37 +476,48 @@ static ScalarVector GetScalars() {
   auto hello = Buffer::FromString("hello");
   DayTimeIntervalType::DayMilliseconds daytime{1, 100};
 
-  return {std::make_shared<BooleanScalar>(false),
-          std::make_shared<Int8Scalar>(3),
-          std::make_shared<UInt16Scalar>(3),
-          std::make_shared<Int32Scalar>(3),
-          std::make_shared<UInt64Scalar>(3),
-          std::make_shared<DoubleScalar>(3.0),
-          std::make_shared<Date32Scalar>(10),
-          std::make_shared<Date64Scalar>(11),
-          std::make_shared<Time32Scalar>(1000, time32(TimeUnit::SECOND)),
-          std::make_shared<Time64Scalar>(1111, time64(TimeUnit::MICRO)),
-          std::make_shared<TimestampScalar>(1111, timestamp(TimeUnit::MILLI)),
-          std::make_shared<MonthIntervalScalar>(1),
-          std::make_shared<DayTimeIntervalScalar>(daytime),
-          std::make_shared<DurationScalar>(60, duration(TimeUnit::SECOND)),
-          std::make_shared<BinaryScalar>(hello),
-          std::make_shared<LargeBinaryScalar>(hello),
-          std::make_shared<FixedSizeBinaryScalar>(
-              hello, fixed_size_binary(static_cast<int32_t>(hello->size()))),
-          std::make_shared<Decimal128Scalar>(Decimal128(10), decimal(16, 4)),
-          std::make_shared<Decimal256Scalar>(Decimal256(10), decimal(76, 38)),
-          std::make_shared<StringScalar>(hello),
-          std::make_shared<LargeStringScalar>(hello),
-          std::make_shared<ListScalar>(ArrayFromJSON(int8(), "[1, 2, 3]")),
-          std::make_shared<LargeListScalar>(ArrayFromJSON(int8(), "[1, 1, 2, 2, 3, 3]")),
-          std::make_shared<FixedSizeListScalar>(ArrayFromJSON(int8(), "[1, 2, 3, 4]")),
-          std::make_shared<StructScalar>(
-              ScalarVector{
-                  std::make_shared<Int32Scalar>(2),
-                  std::make_shared<Int32Scalar>(6),
-              },
-              struct_({field("min", int32()), field("max", int32())}))};
+  FieldVector union_fields{field("string", utf8()), field("number", int32()),
+                           field("other_number", int32())};
+  std::vector<int8_t> union_type_codes{5, 6, 42};
+
+  const auto sparse_union_ty = ::arrow::sparse_union(union_fields, union_type_codes);
+  const auto dense_union_ty = ::arrow::dense_union(union_fields, union_type_codes);
+
+  return {
+      std::make_shared<BooleanScalar>(false), std::make_shared<Int8Scalar>(3),
+      std::make_shared<UInt16Scalar>(3), std::make_shared<Int32Scalar>(3),
+      std::make_shared<UInt64Scalar>(3), std::make_shared<DoubleScalar>(3.0),
+      std::make_shared<Date32Scalar>(10), std::make_shared<Date64Scalar>(11),
+      std::make_shared<Time32Scalar>(1000, time32(TimeUnit::SECOND)),
+      std::make_shared<Time64Scalar>(1111, time64(TimeUnit::MICRO)),
+      std::make_shared<TimestampScalar>(1111, timestamp(TimeUnit::MILLI)),
+      std::make_shared<MonthIntervalScalar>(1),
+      std::make_shared<DayTimeIntervalScalar>(daytime),
+      std::make_shared<DurationScalar>(60, duration(TimeUnit::SECOND)),
+      std::make_shared<BinaryScalar>(hello), std::make_shared<LargeBinaryScalar>(hello),
+      std::make_shared<FixedSizeBinaryScalar>(
+          hello, fixed_size_binary(static_cast<int32_t>(hello->size()))),
+      std::make_shared<Decimal128Scalar>(Decimal128(10), decimal(16, 4)),
+      std::make_shared<Decimal256Scalar>(Decimal256(10), decimal(76, 38)),
+      std::make_shared<StringScalar>(hello), std::make_shared<LargeStringScalar>(hello),
+      std::make_shared<ListScalar>(ArrayFromJSON(int8(), "[1, 2, 3]")),
+      std::make_shared<LargeListScalar>(ArrayFromJSON(int8(), "[1, 1, 2, 2, 3, 3]")),
+      std::make_shared<FixedSizeListScalar>(ArrayFromJSON(int8(), "[1, 2, 3, 4]")),
+      std::make_shared<StructScalar>(
+          ScalarVector{
+              std::make_shared<Int32Scalar>(2),
+              std::make_shared<Int32Scalar>(6),
+          },
+          struct_({field("min", int32()), field("max", int32())})),
+      // Same values, different union type codes
+      std::make_shared<SparseUnionScalar>(std::make_shared<Int32Scalar>(100), 6,
+                                          sparse_union_ty),
+      std::make_shared<SparseUnionScalar>(std::make_shared<Int32Scalar>(100), 42,
+                                          sparse_union_ty),
+      std::make_shared<DenseUnionScalar>(std::make_shared<Int32Scalar>(101), 6,
+                                         dense_union_ty),
+      std::make_shared<DenseUnionScalar>(std::make_shared<Int32Scalar>(101), 42,
+                                         dense_union_ty)};
 }
 
 TEST_F(TestArray, TestMakeArrayFromScalar) {

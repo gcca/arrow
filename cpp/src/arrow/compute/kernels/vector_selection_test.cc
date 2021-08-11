@@ -487,7 +487,7 @@ class TestFilterKernelWithString : public TestFilterKernel<TypeClass> {
   }
 };
 
-TYPED_TEST_SUITE(TestFilterKernelWithString, BinaryTypes);
+TYPED_TEST_SUITE(TestFilterKernelWithString, BinaryArrowTypes);
 
 TYPED_TEST(TestFilterKernelWithString, FilterString) {
   this->AssertFilter(R"(["a", "b", "c"])", "[0, 1, 0]", R"(["b"])");
@@ -996,6 +996,22 @@ TEST_F(TestTakeKernel, InvalidIndexType) {
                                          "[0.0, 1.0, 0.1]", &arr));
 }
 
+TEST_F(TestTakeKernel, TakeCCEmptyIndices) {
+  Datum dat = ChunkedArrayFromJSON(int8(), {"[]"});
+  Datum idx = ChunkedArrayFromJSON(int32(), {});
+  ASSERT_OK_AND_ASSIGN(auto out, Take(dat, idx));
+  ValidateOutput(out);
+  AssertDatumsEqual(ChunkedArrayFromJSON(int8(), {"[]"}), out, true);
+}
+
+TEST_F(TestTakeKernel, TakeACEmptyIndices) {
+  Datum dat = ArrayFromJSON(int8(), {"[]"});
+  Datum idx = ChunkedArrayFromJSON(int32(), {});
+  ASSERT_OK_AND_ASSIGN(auto out, Take(dat, idx));
+  ValidateOutput(out);
+  AssertDatumsEqual(ChunkedArrayFromJSON(int8(), {"[]"}), out, true);
+}
+
 TEST_F(TestTakeKernel, DefaultOptions) {
   auto indices = ArrayFromJSON(int8(), "[null, 2, 0, 3]");
   auto values = ArrayFromJSON(int8(), "[7, 8, 9, null]");
@@ -1081,7 +1097,7 @@ class TestTakeKernelWithString : public TestTakeKernelTyped<TypeClass> {
   }
 };
 
-TYPED_TEST_SUITE(TestTakeKernelWithString, BinaryTypes);
+TYPED_TEST_SUITE(TestTakeKernelWithString, BinaryArrowTypes);
 
 TYPED_TEST(TestTakeKernelWithString, TakeString) {
   this->AssertTake(R"(["a", "b", "c"])", "[0, 1, 0]", R"(["a", "b", "a"])");

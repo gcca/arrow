@@ -370,8 +370,13 @@ if(ARROW_COMPUTE)
        compute/api_vector.cc
        compute/cast.cc
        compute/exec.cc
+       compute/exec/aggregate_node.cc
        compute/exec/exec_plan.cc
        compute/exec/expression.cc
+       compute/exec/filter_node.cc
+       compute/exec/project_node.cc
+       compute/exec/source_node.cc
+       compute/exec/sink_node.cc
        compute/function.cc
        compute/function_internal.cc
        compute/kernel.cc
@@ -483,10 +488,7 @@ if(ARROW_ORC)
   list(APPEND ARROW_SRCS adapters/orc/adapter.cc adapters/orc/adapter_util.cc)
 endif()
 
-if(NOT APPLE AND NOT MSVC_TOOLCHAIN)
-  # Localize thirdparty symbols using a linker version script. This hides them
-  # from the client application. The OS X linker does not support the
-  # version-script option.
+if(CXX_LINKER_SUPPORTS_VERSION_SCRIPT)
   set(ARROW_VERSION_SCRIPT_FLAGS
       "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/symbols.map")
   set(ARROW_SHARED_LINK_FLAGS ${ARROW_VERSION_SCRIPT_FLAGS})

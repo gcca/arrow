@@ -407,6 +407,10 @@ Result<Datum> IndexIn(const Datum& values, const Datum& value_set, ExecContext* 
   return ExecSetLookup("index_in", values, SetLookupOptions{value_set}, ctx);
 }
 
+Result<Datum> NonZero(const Datum& values,  ExecContext* ctx) {
+  return CallFunction("non_zero", {values}, ctx);
+}
+
 // ----------------------------------------------------------------------
 // Boolean functions
 

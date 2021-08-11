@@ -374,6 +374,75 @@ Status ExecIsIn(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
   return IsInVisitor(ctx, *batch[0].array(), out).Execute();
 }
 
+// ----------------------------------------------------------------------
+
+struct NonZeroVisitor {
+  KernelContext* ctx;
+  const ArrayData& data;
+  Datum* out;
+  Int64Builder builder;
+
+  NonZeroVisitor(KernelContext* ctx, const ArrayData& data, Datum* out)
+      : ctx(ctx), data(data), out(out), builder(ctx->exec_context()->memory_pool()) {}
+
+  Status Visit(const DataType& type) {
+    DCHECK_EQ(type.id(), Type::NA);
+    const auto& state = checked_cast<const SetLookupState<NullType>&>(*ctx->state());
+    if (data.length != 0) {
+      if (state.value_set_has_null) {
+        RETURN_NOT_OK(this->builder.Reserve(data.length));
+        for (int64_t i = 0; i < data.length; ++i) {
+          this->builder.UnsafeAppend(0);
+        }
+      } else {
+        RETURN_NOT_OK(this->builder.AppendNulls(data.length));
+      }
+    }
+    return Status::OK();
+  }
+
+  template <typename Type>
+  Status ProcessIndexIn() {
+    using T = typename GetViewType<Type>::T;
+
+    const auto& state = checked_cast<const SetLookupState<Type>&>(*ctx->state());
+
+    RETURN_NOT_OK(this->builder.Reserve(data.length));
+    VisitArrayDataInline<Type>(
+        data,
+        [&](T v) {
+          if (v != 0) {
+            std::int64_t index = state.lookup_table.Get(v);
+            this->builder.UnsafeAppend(state.memo_index_to_value_index[index]);
+          }
+        },
+        [&]() {});
+    return Status::OK();
+  }
+
+  template <typename Type>
+  enable_if_t<has_c_type<Type>::value && !is_boolean_type<Type>::value, Status> Visit(
+      const Type&) {
+    return ProcessIndexIn<
+        typename UnsignedIntType<sizeof(typename Type::c_type)>::Type>();
+  }
+
+  Status Execute() {
+    Status s = VisitTypeInline(*data.type, this);
+    if (!s.ok()) {
+      return s;
+    }
+    std::shared_ptr<ArrayData> out_data;
+    RETURN_NOT_OK(this->builder.FinishInternal(&out_data));
+    out->value = std::move(out_data);
+    return Status::OK();
+  }
+};
+
+Status ExecNonZero(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
+  return NonZeroVisitor(ctx, *batch[0].array(), out).Execute();
+}
+
 // Unary set lookup kernels available for the following input types
 //
 // * Null type
@@ -437,6 +506,21 @@ class IndexInMetaBinary : public MetaFunction {
   }
 };
 
+class NonZeroMetaUnary : public MetaFunction {
+ public:
+  NonZeroMetaUnary()
+      : MetaFunction("non_zero_meta_unary", Arity::Unary(), /*doc=*/nullptr) {}
+
+  Result<Datum> ExecuteImpl(const std::vector<Datum>& args,
+                            const FunctionOptions* options,
+                            ExecContext* ctx) const override {
+    if (options != nullptr) {
+      return Status::Invalid("Unexpected options for 'non_zero_meta_unary' function");
+    }
+    return NonZero(args[0], ctx);
+  }
+};
+
 struct SetLookupFunction : ScalarFunction {
   using ScalarFunction::ScalarFunction;
 
@@ -465,6 +549,12 @@ const FunctionDoc index_in_doc{
      "changed in SetLookupOptions."),
     {"values"},
     "SetLookupOptions"};
+
+const FunctionDoc non_zero_doc{
+    "Return the indices of the non-zero values",
+    ("For each element in `values`, return its index in a given set of\n"
+     "values iff the value is non-zero.\n"),
+    {"values"}};
 
 }  // namespace
 
@@ -505,6 +595,26 @@ void RegisterScalarSetLookup(FunctionRegistry* registry) {
     DCHECK_OK(registry->AddFunction(index_in));
 
     DCHECK_OK(registry->AddFunction(std::make_shared<IndexInMetaBinary>()));
+  }
+
+  // NonZero uses Int64Builder and so is responsible for all its own allocation
+  {
+    ScalarKernel non_zero_base;
+    non_zero_base.init = InitSetLookup;
+    non_zero_base.exec = TrivialScalarUnaryAsArraysExec(
+        ExecNonZero, NullHandling::COMPUTED_NO_PREALLOCATE);
+    non_zero_base.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
+    non_zero_base.mem_allocation = MemAllocation::NO_PREALLOCATE;
+    auto non_zero =
+        std::make_shared<SetLookupFunction>("non_zero", Arity::Unary(), &non_zero_doc);
+
+    AddBasicSetLookupKernels(non_zero_base, /*output_type=*/int64(), non_zero.get());
+
+    non_zero_base.signature = KernelSignature::Make({null()}, int64());
+    DCHECK_OK(non_zero->AddKernel(non_zero_base));
+    DCHECK_OK(registry->AddFunction(non_zero));
+
+    DCHECK_OK(registry->AddFunction(std::make_shared<NonZeroMetaUnary>()));
   }
 }
 

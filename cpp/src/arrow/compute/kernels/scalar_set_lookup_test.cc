@@ -970,5 +970,36 @@ TEST(TestSetLookup, IsInWithImplicitCasts) {
                    ArrayFromJSON(boolean(), "[0, 1, 0, 1]"), &opts);
 }
 
+template <typename Type>
+class TestNonZeroKernelPrimitive : public ::testing::Test {};
+
+template <typename Type>
+class TestNonZeroKernelBinary : public ::testing::Test {};
+
+using NPrimitiveTypes = ::testing::Types<Int8Type, UInt8Type, Int16Type, UInt16Type,
+                                        Int32Type, UInt32Type, Int64Type, UInt64Type,
+                                        FloatType, DoubleType>;
+
+TYPED_TEST_SUITE(TestNonZeroKernelPrimitive, NPrimitiveTypes);
+
+void CheckNonZero(const std::shared_ptr<DataType>& type, const std::string& input_json,
+               const std::string& expected_json,
+               bool skip_nulls = false) {
+  auto input = ArrayFromJSON(type, input_json);
+  auto expected = ArrayFromJSON(int64(), expected_json);
+
+  ASSERT_OK_AND_ASSIGN(Datum actual_datum, NonZero(input));
+  std::shared_ptr<Array> actual = actual_datum.make_array();
+  ValidateOutput(actual_datum);
+  AssertArraysEqual(*expected, *actual, /*verbose=*/true);
+}
+
+TYPED_TEST(TestNonZeroKernelPrimitive, NonZero) {
+  auto type = TypeTraits<TypeParam>::type_singleton();
+
+  // No Nulls
+  CheckNonZero(type, "[0, 45, 0, 0, 123, null, 345]", "[1, 4, 6]");
+}
+
 }  // namespace compute
 }  // namespace arrow

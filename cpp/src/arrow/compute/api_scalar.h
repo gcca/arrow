@@ -711,6 +711,17 @@ ARROW_EXPORT
 Result<Datum> IndexIn(const Datum& values, const Datum& value_set,
                       ExecContext* ctx = NULLPTR);
 
+/// \brief Return the indices of the non-zero values.
+///
+/// For example, given values = ["a", "b", null, null, "e", null],
+/// the output will be = [0, 1, 4]
+///
+/// \param[in] values array from which to find the indices of non-zero values
+/// \param[in] ctx the function execution context, optional
+/// \return array containing the indices of non-zero values
+ARROW_EXPORT
+Result<Datum> NonZero(const Datum& values, ExecContext* ctx = NULLPTR);
+
 /// \brief IsValid returns true for each element of `values` that is not null,
 /// false otherwise
 ///

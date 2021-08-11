@@ -970,5 +970,49 @@ TEST(TestSetLookup, IsInWithImplicitCasts) {
                    ArrayFromJSON(boolean(), "[0, 1, 0, 1]"), &opts);
 }
 
+// ----------------------------------------------------------------------
+// NonZero tests
+
+template <typename Type>
+class TestNonZeroKernelPrimitive : public ::testing::Test {};
+
+TYPED_TEST_SUITE(TestNonZeroKernelPrimitive, PrimitiveTypes);
+
+void CheckNonZero(const std::shared_ptr<DataType>& type, const std::string& input_json,
+               const std::string& expected_json,
+               bool skip_nulls = false) {
+  auto input = ArrayFromJSON(type, input_json);
+  auto expected = ArrayFromJSON(int32(), expected_json);
+
+  ASSERT_OK_AND_ASSIGN(Datum actual_datum, NonZero(input));
+  std::shared_ptr<Array> actual = actual_datum.make_array();
+  ValidateOutput(actual_datum);
+  AssertArraysEqual(*expected, *actual, /*verbose=*/true);
+}
+
+TYPED_TEST(TestNonZeroKernelPrimitive, NonZero) {
+  auto type = TypeTraits<TypeParam>::type_singleton();
+
+  CheckNonZero(type, "[0, 12, 0, 0, 34, null, 57]", "[1, 4, 6]");
+}
+
+class TestNonZeroKernel : public ::testing::Test {};
+
+TEST_F(TestNonZeroKernel, ZeroClose) {
+  CheckNonZero(float32(), "[0, 0.1, 0, 0, 0.01, null, 0.001]", "[1, 4, 6]");
+
+  CheckNonZero(float64(), "[0, 0.1, 0, 0, 0.01, null, 0.001]", "[1, 4, 6]");
+}
+
+TEST_F(TestNonZeroKernel, ToEmptyResult) {
+  CheckNonZero(int64(), "[0, null, 0, null]", "[]");
+
+  CheckNonZero(int64(), "[null, null, null]", "[]");
+
+  CheckNonZero(int64(), "[0, 0, 0, 0]", "[]");
+
+  CheckNonZero(int64(), "[]", "[]");
+}
+
 }  // namespace compute
 }  // namespace arrow
